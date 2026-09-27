@@ -7,12 +7,14 @@ const canvas = $('canvas');
 const ctx = canvas.getContext('2d');
 
 const state = {
-  mode: 'single',      // 'single' | 'multi'
+  mode: 'single',      // 'single' | 'multi' | 'batch'
   result: null,        // 单规格：服务端计算结果
   multiResult: null,   // 多规格：服务端计算结果
+  batchResult: null,   // 批次换版计划：服务端计算结果
   lastInput: null,     // 最近一次成功计算的输入（供快照保存/载入）
   thetaMm: 0,          // 单规格：当前接缝位置 (mm, [0, C))
   thetaDeg: 0,         // 多规格：当前共用角度 (deg, [0, 360))
+  batchHighlight: {},  // 批次：逐单“选角”查看 {orderIndex: detentIndex}
   dragging: false,
   rawMm: null,         // 拖动时未吸附的原始角度（单规格）
   rawDeg: null,        // 拖动时未吸附的原始角度（多规格）
@@ -76,6 +78,107 @@ function refreshSpecRows() {
     row.querySelector('.remove').disabled = rows.length <= 2;
   });
   $('addSpec').disabled = rows.length >= MAX_SPECS_UI;
+}
+
+/* ---------------- 批次换版计划工单表单 ---------------- */
+
+function addBatchZoneRow(host, start = '', end = '') {
+  const row = document.createElement('div');
+  row.className = 'zone-row';
+  row.innerHTML = `
+    <label>起点 (mm)<input type="number" step="any" class="bz-start" value="${start}"></label>
+    <label>终点 (mm)<input type="number" step="any" class="bz-end" value="${end}"></label>
+    <button type="button" class="remove" title="删除">✕</button>`;
+  row.querySelector('.remove').addEventListener('click', () => {
+    row.remove();
+    scheduleCompute();
+  });
+  row.querySelectorAll('input').forEach((i) => i.addEventListener('input', scheduleCompute));
+  host.appendChild(row);
+}
+
+function addOrderRow(cfg = {}) {
+  const n = $('orders').children.length + 1;
+  const card = document.createElement('div');
+  card.className = 'order-card';
+  card.innerHTML = `
+    <div class="order-head">
+      <span class="spec-swatch order-swatch" style="background:${SPEC_COLORS[n - 1]}"></span>
+      <strong class="order-title">工单 ${n}</strong>
+      <button type="button" class="remove order-remove" title="删除工单">✕</button>
+    </div>
+    <div class="order-grid">
+      <label>周长 (mm)<input type="number" min="0.01" step="any" class="o-circ" value="${cfg.circ ?? ''}"></label>
+      <label>接缝宽 (mm)<input type="number" min="0" step="any" class="o-seam" value="${cfg.seam ?? 20}"></label>
+    </div>
+    <div class="order-zones-head hint">保护区 (mm)</div>
+    <div class="o-zones"></div>
+    <button type="button" class="small ghost o-add-zone">+ 保护区</button>`;
+  card.querySelector('.order-remove').addEventListener('click', () => {
+    if ($('orders').children.length <= 2) return;
+    card.remove();
+    refreshOrderRows();
+    scheduleCompute();
+  });
+  card.querySelector('.o-add-zone').addEventListener('click', () => {
+    addBatchZoneRow(card.querySelector('.o-zones'));
+    scheduleCompute();
+  });
+  card.querySelectorAll('.o-circ,.o-seam').forEach((i) =>
+    i.addEventListener('input', scheduleCompute)
+  );
+  const zonesHost = card.querySelector('.o-zones');
+  if (cfg.zones && cfg.zones.length) {
+    for (const z of cfg.zones) addBatchZoneRow(zonesHost, z.start, z.end);
+  }
+  $('orders').appendChild(card);
+}
+
+function refreshOrderRows() {
+  const rows = [...$('orders').children];
+  rows.forEach((card, i) => {
+    card.querySelector('.order-swatch').style.background = SPEC_COLORS[i];
+    card.querySelector('.order-title').textContent = `工单 ${i + 1}`;
+    card.querySelector('.order-remove').disabled = rows.length <= 2;
+  });
+  $('addOrder').disabled = rows.length >= MAX_SPECS_UI;
+}
+
+/** 载入批次换版示例（与单/多规格表单互不影响）。 */
+function loadBatchExample(andCompute) {
+  $('orders').innerHTML = '';
+  addOrderRow({ circ: 400, seam: 20, zones: [{ start: 60, end: 120 }, { start: 200, end: 260 }] });
+  addOrderRow({ circ: 360, seam: 15, zones: [{ start: 300, end: 30 }] });
+  addOrderRow({ circ: 500, seam: 25, zones: [{ start: 90, end: 170 }] });
+  $('batchSteps').value = 12;
+  $('batchOffset').value = 0;
+  $('batchInitial').value = 350;
+  refreshOrderRows();
+  if (andCompute) compute();
+}
+
+/** 读取批次表单。 */
+function readBatchInputs() {
+  const orders = [...$('orders').children].map((card) => ({
+    circumference: parseFloat(card.querySelector('.o-circ').value),
+    seamWidth: parseFloat(card.querySelector('.o-seam').value),
+    zones: [...card.querySelectorAll('.o-zones .zone-row')].map((row) => ({
+      start: parseFloat(row.querySelector('.bz-start').value),
+      end: parseFloat(row.querySelector('.bz-end').value),
+    })),
+  }));
+  const steps = parseInt($('batchSteps').value, 10);
+  const offsetRaw = $('batchOffset').value.trim();
+  const initRaw = $('batchInitial').value.trim();
+  return {
+    orders,
+    detents: {
+      enabled: true,
+      steps,
+      offsetDeg: offsetRaw === '' ? 0 : parseFloat(offsetRaw),
+    },
+    initialDeg: initRaw === '' ? 0 : parseFloat(initRaw),
+  };
 }
 
 function readZones() {
@@ -190,16 +293,24 @@ function readMultiInputs() {
 /* ---------------- 模式切换（两个表单都保留在 DOM，互不丢输入） ---------------- */
 
 function setMode(mode) {
-  if (mode !== 'single' && mode !== 'multi') return;
+  if (mode !== 'single' && mode !== 'multi' && mode !== 'batch') return;
   state.mode = mode;
   document.querySelectorAll('.mode-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.mode === mode);
   });
   $('singleFields').hidden = mode !== 'single';
   $('multiFields').hidden = mode !== 'multi';
+  $('batchFields').hidden = mode !== 'batch';
+  $('seamLabel').hidden = mode === 'batch';
+  $('sharedDetentsBox').hidden = mode === 'batch';
+  document.querySelector('.tolerance-box').classList.toggle('batch-hidden', mode === 'batch');
+  $('sharedZonesBox').hidden = mode === 'batch'; // 批次每单各自填写保护区
   $('singleResults').hidden = mode !== 'single';
   $('multiResults').hidden = mode !== 'multi';
+  $('batchResults').hidden = mode !== 'batch';
   $('multiLegend').hidden = mode !== 'multi';
+  $('batchLegend').hidden = mode !== 'batch';
+  $('routePanel').hidden = mode === 'batch';
   updatePreviewHint();
 
   if (mode === 'multi' && $('specs').children.length === 0) {
@@ -207,7 +318,11 @@ function setMode(mode) {
     addSpecRow(Number.isFinite(c) ? c : 400);
     addSpecRow(Number.isFinite(c) ? Math.round(c * 1.25 * 100) / 100 : 500);
   }
+  if (mode === 'batch' && $('orders').children.length === 0) {
+    loadBatchExample(false);
+  }
   refreshSpecRows();
+  refreshOrderRows();
   updateSnapshotModeUI();
   renderRoute();
   scheduleCompute();
@@ -219,6 +334,10 @@ let computeTimer = null;
 
 /** 拖动提示随模式与档位约束变化。 */
 function updatePreviewHint() {
+  if (state.mode === 'batch') {
+    $('previewHint').textContent = '逐单同心环展示各单可行段、停机档位与换版转角（右侧可逐单选角查看）';
+    return;
+  }
   const detentsOn = $('detentsEnabled').checked;
   $('previewHint').textContent = state.mode === 'multi'
     ? detentsOn
@@ -237,6 +356,7 @@ function scheduleCompute() {
 async function compute() {
   $('error').hidden = true;
   if (state.mode === 'multi') return computeMulti();
+  if (state.mode === 'batch') return computeBatch();
 
   const body = readInputs();
 
@@ -330,6 +450,58 @@ async function computeMulti() {
   exitDiffMode();
   renderMultiResults();
   renderRoute();
+  draw();
+}
+
+/* ---------------- 批次换版计划 ---------------- */
+
+async function computeBatch() {
+  const body = readBatchInputs();
+
+  if (body.orders.length < 2 || body.orders.length > 8) {
+    return showError('请输入 2～8 个工单');
+  }
+  for (let i = 0; i < body.orders.length; i++) {
+    const o = body.orders[i];
+    if (!Number.isFinite(o.circumference) || o.circumference <= 0) {
+      return showError(`工单 ${i + 1} 的筒体周长必须为大于 0 的数值`);
+    }
+    if (!Number.isFinite(o.seamWidth) || o.seamWidth < 0) {
+      return showError(`工单 ${i + 1} 的接缝安全宽度必须为不小于 0 的数值`);
+    }
+    if (o.zones.some((z) => !Number.isFinite(z.start) || !Number.isFinite(z.end))) {
+      return showError(`工单 ${i + 1} 的保护区起点与终点必须为数值 (mm)`);
+    }
+  }
+  const d = body.detents;
+  if (!Number.isInteger(d.steps) || d.steps < 2 || d.steps > 72) {
+    return showError('共用设备每圈档位数必须为 2～72 的整数');
+  }
+  if (!Number.isFinite(d.offsetDeg)) {
+    return showError('零位偏移必须为数值（角度）');
+  }
+  if (!Number.isFinite(body.initialDeg)) {
+    return showError('初始角度必须为数值（°）');
+  }
+
+  let result;
+  try {
+    const res = await fetch('/api/batch-plan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    result = await res.json();
+    if (!res.ok) return showError(result.error || '计算失败');
+  } catch (e) {
+    return showError('无法连接服务器：' + e.message);
+  }
+
+  state.batchResult = result;
+  state.lastInput = null; // 批次计划不进入单规格快照
+  state.batchHighlight = {};
+  exitDiffMode();
+  renderBatchResults();
   draw();
 }
 
@@ -928,6 +1100,147 @@ function renderMultiLegend() {
       ? `<span class="lg-item"><span class="lg-swatch conflict"></span>冲突区间（首次归零）</span>` +
         (r.fallback ? `<span class="lg-item"><span class="lg-swatch fallback"></span>最小违约备选角度</span>` : '')
       : '') +
+    `</div>`;
+}
+
+/* ---------------- 批次换版计划结果 ---------------- */
+
+/** 一次换版/初始旋转的文字行。 */
+function batchChangeText(ch) {
+  const arrow = ch.direction === 'cw' ? '↻' : '↺';
+  if (ch.samePoint) {
+    return `<span class="bc-same">同档位 ${fmtDeg(ch.toDeg)}°，无需旋转</span>`;
+  }
+  return (
+    `${arrow} ${ch.directionLabel} <strong>${fmtDeg(ch.sweepDeg)}°</strong>` +
+    ` <span class="hint">（${fmtDeg(ch.fromDeg)}° → ${fmtDeg(ch.toDeg)}°）</span>`
+  );
+}
+
+function renderBatchResults() {
+  const r = state.batchResult;
+  if (!r) return;
+
+  const summary = $('batchSummary');
+  const failBox = $('batchFailureBox');
+  summary.hidden = !r.feasible;
+  failBox.hidden = r.feasible;
+
+  if (r.feasible) {
+    summary.innerHTML =
+      `<div>整批最小总转角：<span class="num">${fmtDeg(r.totalRotationDeg)}°</span>` +
+      ` ｜ 档位序列 ${r.plan.detentSequence.map((k) => k + 1).join(' → ')}` +
+      `（每圈 ${r.detents.steps} 档，零位偏移 ${fmtDeg(r.detents.offsetDeg)}°，` +
+      `初始角度 ${fmtDeg(r.initialDeg)}°）</div>` +
+      `<div class="hint">同总成本时已取档位序号字典序最小的序列；点击各单可用档位可在圆盘上逐单选角查看</div>`;
+  } else {
+    const f = r.failure;
+    const kind = f.fullCircleNoSolution
+      ? '<strong>整圈无解：</strong>该单保护区（含接缝安全宽度扩展）已覆盖整圈，连续角度域即无停机位置。'
+      : '<strong>有安全段但无档位：</strong>该单连续安全角度段非空，但共用设备没有任何档位落在安全段内。';
+    failBox.innerHTML =
+      `<div>首个失败工单：<strong>工单 ${f.index + 1}</strong>（周长 ${fmtMm(f.circumference)} mm）</div>` +
+      `<div class="chain-item">${kind}</div>` +
+      `<div class="chain-item">${f.reason}</div>`;
+  }
+
+  $('batchOrderCount').textContent = `（${r.orders.length} 个工单）`;
+  const ul = $('batchOrderList');
+  ul.innerHTML = '';
+  r.orders.forEach((o) => {
+    const li = document.createElement('li');
+    li.className = 'batch-order';
+    const color = SPEC_COLORS[o.index % SPEC_COLORS.length];
+    const stop = r.feasible ? r.plan.stops[o.index] : null;
+    const change = r.feasible ? r.plan.changes[o.index] : null;
+    const chosen = state.batchHighlight[o.index];
+    const highlightIndex = chosen !== undefined ? chosen : stop ? stop.detentIndex : null;
+
+    let head;
+    if (o.status === 'full-circle-no-solution') {
+      head = `<span class="spec-swatch" style="background:${color}"></span>` +
+        `<div class="bo-info"><div class="bo-name">工单 ${o.index + 1}：${fmtMm(o.circumference)} mm` +
+        ` ｜ 接缝 ${fmtMm(o.seamWidth)} mm</div>` +
+        `<div class="bo-status bad">保护区覆盖整圈，无停机角度</div></div>`;
+    } else if (o.status === 'detents-none-available') {
+      head = `<span class="spec-swatch" style="background:${color}"></span>` +
+        `<div class="bo-info"><div class="bo-name">工单 ${o.index + 1}：${fmtMm(o.circumference)} mm` +
+        ` ｜ 接缝 ${fmtMm(o.seamWidth)} mm</div>` +
+        `<div class="bo-status warn">有 ${o.result.feasible.length} 段连续安全段，但 0/${r.detents.steps} 档可用</div></div>`;
+    } else {
+      const gap = stop.gapDeg === null ? '无禁用区' : `间隙 ${fmtDeg(stop.gapDeg)}°`;
+      const hl = chosen !== undefined && chosen !== stop.detentIndex;
+      head =
+        `<span class="spec-swatch" style="background:${color}"></span>` +
+        `<div class="bo-info"><div class="bo-name">工单 ${o.index + 1}：${fmtMm(o.circumference)} mm` +
+        ` ｜ 接缝 ${fmtMm(o.seamWidth)} mm ｜ ${o.available.length}/${r.detents.steps} 档可用</div>` +
+        `<div class="bo-stop">停机：第 ${highlightIndex + 1} 档 ${fmtDeg(
+          r.detents.positions[highlightIndex]
+        )}° ｜ ${gap}${hl ? '<span class="bo-view">（查看选角）</span>' : ''}</div></div>`;
+    }
+
+    let changeHtml = '';
+    if (change) {
+      changeHtml =
+        `<div class="bo-change">${o.index === 0 ? '初始角度 → 首单' : `换版 ${o.index}（工单 ${o.index} → ${o.index + 1}）`}：` +
+        batchChangeText(change) + `</div>`;
+    }
+
+    let chips = '';
+    if (o.status === 'ok') {
+      chips =
+        '<div class="bo-chips">' +
+        o.available.map((d) => {
+          const planned = stop && d.index === stop.detentIndex;
+          const active = d.index === highlightIndex;
+          return `<button type="button" class="bo-chip${planned ? ' planned' : ''}${active ? ' active' : ''}"` +
+            ` data-order="${o.index}" data-detent="${d.index}"` +
+            ` title="${planned ? '计划停机档位' : '点击在圆盘上查看该选角'}：${fmtDeg(d.deg)}°">` +
+            `${d.index + 1} · ${fmtDeg(d.deg)}°</button>`;
+        }).join('') +
+        '</div>';
+    }
+
+    li.innerHTML = head + changeHtml + chips;
+    li.querySelectorAll('.bo-chip').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const oi = Number(btn.dataset.order);
+        const di = Number(btn.dataset.detent);
+        const planned = r.plan.stops[oi].detentIndex;
+        if (di === planned) delete state.batchHighlight[oi];
+        else state.batchHighlight[oi] = di;
+        renderBatchResults();
+        draw();
+      });
+    });
+    ul.appendChild(li);
+  });
+
+  renderBatchLegend();
+}
+
+function renderBatchLegend() {
+  const r = state.batchResult;
+  const el = $('batchLegend');
+  if (!r || state.mode !== 'batch') {
+    el.hidden = true;
+    return;
+  }
+  el.hidden = false;
+  const items = r.orders
+    .map(
+      (o) =>
+        `<span class="lg-item"><span class="lg-swatch" style="background:${
+          SPEC_COLORS[o.index % SPEC_COLORS.length]
+        }"></span>工单 ${o.index + 1} 可行段</span>`
+    )
+    .join('');
+  el.innerHTML =
+    `<div class="lg-row">${items}</div>` +
+    `<div class="lg-row">` +
+    `<span class="lg-item"><span class="lg-swatch common"></span>计划停机档位</span>` +
+    `<span class="lg-item"><span class="lg-swatch" style="background:#7c3aed"></span>换版（最短角距离）</span>` +
+    `<span class="lg-item"><span class="lg-swatch" style="background:#d97706"></span>初始角度</span>` +
     `</div>`;
 }
 
@@ -1654,6 +1967,194 @@ function drawMulti() {
   markActiveCommon();
 }
 
+/* ---------------- 批次换版计划 Canvas ---------------- */
+
+function drawBatch() {
+  const r = state.batchResult;
+  const { cx, cy, R, size } = geom();
+  ctx.clearRect(0, 0, size, size);
+  if (!r) return;
+
+  // 刻度（每 30°）
+  ctx.strokeStyle = '#d1d5db';
+  ctx.fillStyle = '#9ca3af';
+  ctx.lineWidth = 1;
+  ctx.font = '11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (let d = 0; d < 360; d += 30) {
+    const a = multiRadDeg(d);
+    const x1 = cx + (R + 14) * Math.cos(a);
+    const y1 = cy + (R + 14) * Math.sin(a);
+    const x2 = cx + (R + 22) * Math.cos(a);
+    const y2 = cy + (R + 22) * Math.sin(a);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.fillText(`${d}°`, cx + (R + 36) * Math.cos(a), cy + (R + 36) * Math.sin(a));
+  }
+
+  // 逐单同心环：外环底色 + 绿色可行段（整圈无解画红色整圈；无可用档仍画可行绿段）
+  const n = r.orders.length;
+  const ringW = 8;
+  const ringGap = 5;
+  const outR = R + 2;
+  r.orders.forEach((o) => {
+    const ringR = outR - o.index * (ringW + ringGap);
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = ringW;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringR, 0, TAU);
+    ctx.stroke();
+
+    const color = SPEC_COLORS[o.index % SPEC_COLORS.length];
+    const res = o.result;
+    if (o.status === 'full-circle-no-solution') {
+      ctx.strokeStyle = '#d43a3a';
+      ctx.lineWidth = ringW;
+      ctx.beginPath();
+      ctx.arc(cx, cy, ringR, 0, TAU);
+      ctx.stroke();
+    } else {
+      drawDegreeRing(cx, cy, ringR, res.feasible, color, ringW);
+    }
+  });
+
+  const innerR = outR - (n - 1) * (ringW + ringGap) - ringW;
+
+  // 共用设备档位短刻度（最外侧）
+  const radD = (deg) => (deg / 360) * TAU - Math.PI / 2;
+  const feasibleSet = new Set();
+  const plannedSet = new Set();
+  r.orders.forEach((o) => (o.available || []).forEach((d) => feasibleSet.add(d.index)));
+  if (r.feasible) r.plan.stops.forEach((s) => plannedSet.add(s.detentIndex));
+  r.detents.positions.forEach((deg, index) => {
+    const a = radD(deg);
+    const planned = plannedSet.has(index);
+    const anyAvail = feasibleSet.has(index);
+    const r0 = R + 24;
+    const r1 = planned ? R + 33 : anyAvail ? R + 30 : R + 27;
+    ctx.beginPath();
+    ctx.moveTo(cx + r0 * Math.cos(a), cy + r0 * Math.sin(a));
+    ctx.lineTo(cx + r1 * Math.cos(a), cy + r1 * Math.sin(a));
+    ctx.strokeStyle = planned ? '#065f46' : anyAvail ? '#0f7a3d' : '#c4c9d2';
+    ctx.lineWidth = planned ? 2.4 : anyAvail ? 1.8 : 1.1;
+    ctx.stroke();
+  });
+
+  // 初始角度：琥珀色菱形（固定半径，不与任何单环绑定）
+  const initR = innerR - 26;
+  const drawDiamond = (deg, rad0, color, sizePx) => {
+    const a = radD(deg);
+    const x = cx + rad0 * Math.cos(a);
+    const y = cy + rad0 * Math.sin(a);
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(a + Math.PI / 2);
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(0, -sizePx);
+    ctx.lineTo(sizePx * 0.8, 0);
+    ctx.lineTo(0, sizePx);
+    ctx.lineTo(-sizePx * 0.8, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  };
+  drawDiamond(r.initialDeg, initR, '#d97706', 6);
+
+  // 逐单停机档位：按各单环半径画点（计划点绿色实心；查看选角用蓝色空心圈）
+  const drawDot = (deg, rad0, color, filled, radiusPx) => {
+    const a = radD(deg);
+    const x = cx + rad0 * Math.cos(a);
+    const y = cy + rad0 * Math.sin(a);
+    ctx.beginPath();
+    ctx.arc(x, y, radiusPx, 0, TAU);
+    ctx.fillStyle = filled ? color : '#fff';
+    ctx.fill();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  };
+
+  if (r.feasible) {
+    // 换版角度：初始菱形 → 首单环、相邻单环之间，紫色最短圆弧 + 箭头
+    r.plan.changes.forEach((ch) => {
+      if (ch.samePoint) return;
+      const rr =
+        ch.kind === 'initial'
+          ? (initR + outR) / 2
+          : outR - (ch.index - 0.5) * (ringW + ringGap) - ringW / 2;
+      const ccw = ch.direction === 'ccw';
+      ctx.save();
+      ctx.strokeStyle = '#7c3aed';
+      ctx.globalAlpha = 0.9;
+      ctx.lineWidth = 3;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr, radD(ch.fromDeg), radD(ch.toDeg), ccw);
+      ctx.stroke();
+      ctx.restore();
+
+      // 箭头
+      const ab = radD(ch.toDeg);
+      const sign = ccw ? -1 : 1;
+      const ux = Math.cos(ab);
+      const uy = Math.sin(ab);
+      const tx = -Math.sin(ab) * sign;
+      const ty = Math.cos(ab) * sign;
+      const bx = cx + rr * ux;
+      const by = cy + rr * uy;
+      ctx.beginPath();
+      ctx.moveTo(bx + tx * 8, by + ty * 8);
+      ctx.lineTo(bx - tx * 5 + ux * 5, by - ty * 5 + uy * 5);
+      ctx.lineTo(bx - tx * 5 - ux * 5, by - ty * 5 - uy * 5);
+      ctx.closePath();
+      ctx.fillStyle = '#7c3aed';
+      ctx.fill();
+    });
+
+    // 停机点（画在弧线之上）；查看选角（非计划）用蓝色空心圈
+    r.orders.forEach((o) => {
+      const ringR = outR - o.index * (ringW + ringGap);
+      const stop = r.plan.stops[o.index];
+      const hl = state.batchHighlight[o.index];
+      drawDot(stop.deg, ringR, '#065f46', true, 5);
+      if (hl !== undefined && hl !== stop.detentIndex) {
+        drawDot(r.detents.positions[hl], ringR, '#2563eb', false, 6);
+      }
+    });
+  }
+
+  // 中心文字
+  ctx.fillStyle = '#1f2937';
+  ctx.font = 'bold 20px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  if (r.feasible) {
+    ctx.fillStyle = '#065f46';
+    ctx.fillText(`总转角 ${fmtDeg(r.totalRotationDeg)}°`, cx, cy - 10);
+    ctx.font = '12.5px sans-serif';
+    ctx.fillStyle = '#6b7280';
+    ctx.fillText(`${n} 个工单 ｜ ${r.detents.steps} 档/圈`, cx, cy + 12);
+    ctx.fillText(`初始 ${fmtDeg(r.initialDeg)}° ｜ 序列 ${r.plan.detentSequence.map((k) => k + 1).join('→')}`, cx, cy + 30);
+  } else {
+    ctx.fillStyle = '#d43a3a';
+    ctx.fillText('批次计划不可行', cx, cy - 12);
+    ctx.font = '13px sans-serif';
+    ctx.fillText(`首个失败：工单 ${r.failure.index + 1}`, cx, cy + 10);
+    ctx.fillStyle = r.failure.fullCircleNoSolution ? '#d43a3a' : '#d97706';
+    ctx.fillText(r.failure.fullCircleNoSolution ? '保护区覆盖整圈' : '有安全段但无可用档位', cx, cy + 30);
+  }
+
+  $('currentPos').textContent = r.feasible
+    ? `逐单同心环（外→内为工单顺序）：绿点为各单停机档位，紫弧为换版最短转角，琥珀菱形为初始角度 ${fmtDeg(r.initialDeg)}°`
+    : r.failure.fullCircleNoSolution
+      ? `工单 ${r.failure.index + 1} 保护区覆盖整圈，批次在该单终止`
+      : `工单 ${r.failure.index + 1} 有连续安全段但无可用档位，批次在该单终止`;
+}
+
 /** 当前共用角度对应的档位序号文本（若非可用档位返回 “—”）。 */
 function currentMultiDetentLabel(r) {
   const hit = (r.detents.available || []).find((d) => Math.abs(d.deg - state.thetaDeg) <= 1e-7);
@@ -1663,6 +2164,7 @@ function currentMultiDetentLabel(r) {
 /** 统一绘制入口：按当前模式分发。 */
 function draw() {
   if (state.mode === 'multi') drawMulti();
+  else if (state.mode === 'batch') drawBatch();
   else drawSingle();
 }
 
@@ -1688,6 +2190,7 @@ function pointerDeg(ev) {
 }
 
 canvas.addEventListener('pointerdown', (ev) => {
+  if (state.mode === 'batch') return; // 批次计划为只读方案，不支持拖动旋转
   if (state.mode === 'multi') {
     if (!state.multiResult) return;
     state.dragging = true;
@@ -1837,7 +2340,7 @@ function updateCompareBtn() {
 }
 
 function saveSnapshot() {
-  if (state.mode === 'multi') {
+  if (state.mode !== 'single') {
     return snapshotMsg('快照仅保存单规格结果；请切回单规格模式');
   }
   if (!state.result || !state.lastInput) {
@@ -1854,14 +2357,17 @@ function saveSnapshot() {
   renderSnapshotList();
 }
 
-/** 多规格模式下禁用快照保存输入，并给出提示。 */
+/** 多规格/批次模式下禁用快照保存输入，并给出提示。 */
 function updateSnapshotModeUI() {
-  const multi = state.mode === 'multi';
-  $('snapshotName').disabled = multi;
-  $('saveSnapshot').disabled = multi;
-  $('snapshotName').placeholder = multi
-    ? '多规格模式不支持快照（仅单规格结果可保存）'
-    : '快照名称，如：400mm 初始方案';
+  const nonSingle = state.mode !== 'single';
+  $('snapshotName').disabled = nonSingle;
+  $('saveSnapshot').disabled = nonSingle;
+  $('snapshotName').placeholder =
+    state.mode === 'multi'
+      ? '多规格模式不支持快照（仅单规格结果可保存）'
+      : state.mode === 'batch'
+        ? '批次换版计划不支持快照（仅单规格结果可保存）'
+        : '快照名称，如：400mm 初始方案';
 }
 
 function loadSnapshot(id) {
@@ -2204,6 +2710,16 @@ $('addSpec').addEventListener('click', () => {
     scheduleCompute();
   }
 });
+$('addOrder').addEventListener('click', () => {
+  if ($('orders').children.length < MAX_SPECS_UI) {
+    addOrderRow();
+    refreshOrderRows();
+    scheduleCompute();
+  }
+});
+['batchSteps', 'batchOffset', 'batchInitial'].forEach((id) =>
+  $(id).addEventListener('input', scheduleCompute)
+);
 document.querySelectorAll('.mode-btn').forEach((btn) => {
   btn.addEventListener('click', () => setMode(btn.dataset.mode));
 });
@@ -2226,6 +2742,11 @@ $('tolCw').addEventListener('input', scheduleCompute);
 $('routeFrom').addEventListener('input', scheduleCompute);
 $('routeTo').addEventListener('input', scheduleCompute);
 $('loadExample').addEventListener('click', () => {
+  if (state.mode === 'batch') {
+    loadBatchExample(true);
+    compute();
+    return;
+  }
   $('seamWidth').value = 20;
   $('zones').innerHTML = '';
   addZoneRow(60, 120);
@@ -2260,6 +2781,7 @@ $('exitDiff').addEventListener('click', () => {
 });
 renderSnapshotList();
 refreshSpecRows();
+refreshOrderRows();
 updateSnapshotModeUI();
 updateDetentsUI();
 updateToleranceUI();

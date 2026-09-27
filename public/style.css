@@ -465,6 +465,93 @@ button.small { padding: 3px 10px; font-size: 12px; }
 .snapshot-diff-action button { width: 100%; }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+/* ---------------- 批次换版计划 ---------------- */
+
+.batch-hidden { display: none !important; }
+.batch-device .box-title { margin: 0 0 6px; font-size: 13px; }
+
+.order-card {
+  border: 1px solid var(--line);
+  border-left: 4px solid var(--blue);
+  border-radius: 8px;
+  padding: 9px 10px;
+  margin-bottom: 10px;
+  background: #f9fafb;
+}
+.order-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.order-head .order-title { font-size: 13px; flex: 1; }
+.order-head .order-remove {
+  border: none;
+  background: none;
+  color: var(--red);
+  font-size: 15px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+.order-grid { display: flex; gap: 8px; }
+.order-grid label { flex: 1; font-size: 11.5px; color: var(--muted); }
+.order-zones-head { margin: 7px 0 2px; }
+.order-card .zone-row { margin-bottom: 5px; }
+.order-card .o-add-zone { margin-top: 5px; }
+
+.batch-summary {
+  background: #ecfdf5;
+  border: 1px solid #a7f3d0;
+  color: #065f46;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 13.5px;
+  line-height: 1.7;
+}
+.batch-summary .num { font-size: 19px; font-weight: 700; }
+
+.batch-fail { line-height: 1.7; }
+
+.batch-order-list { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+.batch-order {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  margin-bottom: 8px;
+}
+.batch-order .bo-info { flex: 1; min-width: 0; }
+.batch-order { display: block; }
+.batch-order > div:first-child { display: flex; gap: 8px; align-items: flex-start; }
+.batch-order .bo-name { font-weight: 600; font-size: 12.5px; }
+.batch-order .bo-status { font-size: 12px; margin-top: 2px; }
+.batch-order .bo-status.bad { color: var(--red); }
+.batch-order .bo-status.warn { color: #b45309; }
+.batch-order .bo-stop { font-size: 12px; color: #065f46; margin-top: 2px; }
+.batch-order .bo-stop .bo-view { color: var(--blue); margin-left: 6px; }
+.batch-order .bo-change {
+  margin-top: 6px;
+  padding: 5px 8px;
+  background: #f5f3ff;
+  border: 1px solid #ddd6fe;
+  border-radius: 6px;
+  color: #5b21b6;
+  font-size: 12px;
+}
+.batch-order .bo-change .bc-same { color: var(--muted); }
+.bo-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.bo-chip {
+  background: #fff;
+  color: #15803d;
+  border: 1px solid #86efac;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.bo-chip:hover { background: #f0fdf4; filter: none; }
+.bo-chip.planned { background: #065f46; color: #fff; border-color: #065f46; font-weight: 600; }
+.bo-chip.active { outline: 2px solid var(--blue); outline-offset: 1px; }
+
 /* ---------------- 快照差异 ---------------- */
 
 .diff-meta {

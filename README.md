@@ -24,6 +24,20 @@
 - 切回「单规格模式」时，单规格的周长与多规格周长列表均保留在页面中，**不会丢失任何已输入内容**。
 - 方案快照仅保存单规格结果，多规格模式下快照入口自动禁用。
 
+## 批次换版计划
+
+顶部切换到「批次换版计划」后，按**固定生产顺序**输入 **2～8 个工单**（每单各自的筒体周长、接缝安全宽度与毫米制保护区），全批共用同一台设备：
+
+- **共用设备参数**：每圈**档位数 2～72 的整数**、**零位偏移 (°)** 与**初始角度 (°)**；档位角度仍为 θ = 偏移 + n×360°/档位数（按整圈归一）。
+- 逐单复用现有**单规格计算**的可用档位（边界档位也算可用）：每单停机角度只受**该单安全段**约束。
+- **换版发生在工单之间**：换版旋转不经过其他工单，安全段不限制换版路径，只限制各工单的停机档位。
+- 成本为**圆周最短角距离**：初始角度 → 首单停机档位，以及相邻工单停机档位之间；动态规划求**整批总转角最小**的档位序列；**总成本相同取档位序号序列字典序最小**（序号为角度升序、0 起的设备档位号）。两个方向等长（含 180° 与 0°）取顺时针。
+- **无可用档位时指出首个失败工单**（按工单顺序），并区分：
+  - **整圈无解**：该单保护区（含接缝安全宽度扩展）覆盖整圈，连续角度域即无停机位置；
+  - **有安全段但无档位**：连续安全段非空，但没有任何共用设备档位落在该单安全段内。
+- 提供**独立表单**（每单可单独增删保护区，与单/多规格表单互不丢输入）；结果区**逐单选角**列出每单全部可用档位（计划停机档位高亮，点击其他档位仅在圆盘上查看该选角，不改变计划），并按顺序展示初始角度 → 首单及每一次**换版角度**（方向与转角）。
+- Canvas 以**逐单同心环**（外→内即工单顺序）叠加各单可行段，绿点为各单停机档位，紫弧（带箭头）为初始/相邻单之间的换版最短转角，琥珀菱形为初始角度。
+
 ## 调机旋转路径规划
 
 在结果区旁的「调机旋转路径」面板输入**当前角度**与**目标角度**（°，任意数值，按整圈归一），系统基于当前计算结果的**可行段**（单规格）或**共用安全段**（多规格）规划调机路径：
@@ -90,6 +104,7 @@ docker compose down
 | ----------- | ---- |
 | `POST /api/compute` | 单规格计算。请求体：`{circumference, seamWidth, zones:[{start,end}], detents?, route?, tolerance?}`（单位 mm） |
 | `POST /api/compute-multi` | 多规格共用角度。请求体：`{circumferences:[…2～8 个周长…], seamWidth, zones, detents?, route?, tolerance?}`；返回每个规格的完整单规格结果（`specs[].result`）、圆周交集 `common`（角度弧段）、默认角度 `best.deg` 及各规格间隙 `best.gaps`；无共同解时 `noSolution=true` 并给出 `blocker`（首次归零的规格序号、此前公共段 `priorCommon`、该规格禁用段 `blockingForbidden` 与冲突区间 `conflictSegments`）与最小违约备选 `fallback`（见下） |
+| `POST /api/batch-plan` | 批次换版计划。请求体：`{orders:[…2～8 个工单…], detents, initialDeg?}`；每单为 `{circumference, seamWidth, zones:[{start,end}]}`（单位 mm，各自独立）；`detents` **必填且启用**，`steps` 为 **2～72** 整数、`offsetDeg?` 角度；`initialDeg?` 缺省为 `0`（任意数值按整圈归一）。返回逐单单规格结果 `orders[].result` 与其 `available` 可用档位；可行时给出最优档位序列 `plan.detentSequence`、逐单停机 `plan.stops[]`、初始/换版角度 `plan.changes[]` 与 `totalRotationDeg`；不可行时 `feasible=false`、`plan=null` 并给出 `failure`（首个失败工单 `index`、`type:'full-circle-no-solution' | 'detents-none-available'` 及说明） |
 | `GET /api/health` | 健康检查 |
 
 `detents`（可选）为设备档位约束：`{enabled:true, steps:2～360 的整数, offsetDeg?:数值角度}`；缺省或 `enabled:false` 时行为不变（返回 `detents:{enabled:false}`）。启用后返回：
@@ -155,6 +170,31 @@ docker compose down
 | `reason` | 无解原因说明文本（含首次归零规格、是否整圈禁用、求解域是否限定在档位） |
 
 侵入深度定义：角度 θ 落在某规格禁用弧内时，沿圆周走到该弧最近出口的角距离；落在安全处为 0。
+
+### 批次换版计划 `POST /api/batch-plan`
+
+每单独立做单规格计算（启用同一套设备档位），再以动态规划求总转角最小的停机档位序列。可行响应（`feasible:true`）：
+
+| 字段 | 说明 |
+| ---- | ---- |
+| `detents` | 共用设备档位 `{enabled:true, steps, offsetDeg, stepDeg, positions[]}` |
+| `initialDeg` | 归一化到 0°–360° 的初始角度 |
+| `orders[]` | 逐单结果 `{index, circumference, seamWidth, zones, status:'ok', available:[{index,deg,mm,gapDeg}], result}`；`result` 为该单完整单规格计算结果 |
+| `plan.detentSequence` | 最优停机档位序号序列（角度升序 0 起），总成本并列时字典序最小 |
+| `plan.stops[]` | 逐单停机 `{orderIndex, detentIndex, deg, mm, gapDeg}` |
+| `plan.changes[]` | 初始角度→首单（`kind:'initial'`）与相邻工单换版（`kind:'changeover'`）各一段：`{fromDeg, toDeg, direction:'cw'/'ccw', directionLabel, sweepDeg, samePoint}`，转角为圆周最短角距离，等长（含 0°）取顺时针 |
+| `totalRotationDeg` | 整批总转角（°），等于各 `changes.sweepDeg` 之和 |
+
+不可行响应（`feasible:false`）：`plan=null`、`totalRotationDeg=null`，并给出：
+
+| 字段 | 说明 |
+| ---- | ---- |
+| `failure.index` | 首个无可用档位的工单序号（0 起） |
+| `failure.type` | `full-circle-no-solution`（该单保护区覆盖整圈，连续域无解）｜ `detents-none-available`（有连续安全段但无档位落在其中） |
+| `failure.fullCircleNoSolution` / `failure.detentsNoneAvailable` | 两类失败的布尔标记（互斥） |
+| `failure.reason` | 人类可读说明（含工单序号、周长、档位参数） |
+
+参数非法（工单数不在 2～8、周长/接缝宽/保护区非数值、`detents` 未启用或 `steps` 非 2～72 整数、`initialDeg` 非数值）时接口返回 400。
 
 ## 本地开发（可选）
 

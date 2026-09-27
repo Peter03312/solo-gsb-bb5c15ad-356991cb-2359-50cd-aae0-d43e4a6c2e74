@@ -19,6 +19,7 @@
         <div class="mode-switch" role="tablist">
           <button type="button" class="mode-btn active" data-mode="single">单规格模式</button>
           <button type="button" class="mode-btn" data-mode="multi">多规格共用角度（2～8 个周长）</button>
+          <button type="button" class="mode-btn" data-mode="batch">批次换版计划（2～8 个工单）</button>
         </div>
 
         <div id="singleFields">
@@ -35,11 +36,37 @@
           <p class="hint">2～8 个周长，共用同一接缝宽度与保护区，结果统一到角度域求交集</p>
         </div>
 
-        <label class="full-label seam-label">接缝安全宽度 (mm)
+        <div id="batchFields" hidden>
+          <h3>工单序列（固定生产顺序）
+            <button id="addOrder" type="button" class="small">+ 添加工单</button>
+          </h3>
+          <div id="orders"></div>
+          <p class="hint">2～8 个工单，各自周长、接缝宽度与保护区；全批共用同一设备档位与初始角度</p>
+
+          <div class="detents-box batch-device">
+            <h3 class="box-title">共用设备档位</h3>
+            <div class="detents-fields" style="display:flex">
+              <label>每圈档位数（2～72）
+                <input id="batchSteps" type="number" min="2" max="72" step="1" value="12" />
+              </label>
+              <label>零位偏移 (°)
+                <input id="batchOffset" type="number" step="any" value="0" />
+              </label>
+            </div>
+            <div class="detents-fields" style="display:flex">
+              <label>初始角度 (°)
+                <input id="batchInitial" type="number" step="any" value="0" />
+              </label>
+            </div>
+            <p class="hint">仅允许角度 θ = 偏移 + n×360°/档位数；换版发生在工单之间，安全段只限制各工单停机角度</p>
+          </div>
+        </div>
+
+        <label class="full-label seam-label" id="seamLabel">接缝安全宽度 (mm)
           <input id="seamWidth" type="number" min="0" step="any" value="20" />
         </label>
 
-        <div class="detents-box">
+        <div id="sharedDetentsBox" class="detents-box">
           <label class="detents-toggle">
             <input id="detentsEnabled" type="checkbox" />
             <span>启用设备档位约束</span>
@@ -71,8 +98,10 @@
           <p class="hint">标称角度 θ 可靠 ⟺ 从 θ−逆时针误差 到 θ+顺时针误差 的整条圆弧均安全（含边界）</p>
         </div>
 
-        <h3>印刷保护区 (mm)<button id="addZone" type="button" class="small">+ 添加</button></h3>
-        <div id="zones"></div>
+        <div id="sharedZonesBox">
+          <h3>印刷保护区 (mm)<button id="addZone" type="button" class="small">+ 添加</button></h3>
+          <div id="zones"></div>
+        </div>
 
         <div class="actions">
           <button id="compute" type="button">计算</button>
@@ -101,6 +130,7 @@
         <canvas id="canvas" width="520" height="520"></canvas>
         <p id="currentPos" class="current-pos"></p>
         <div id="multiLegend" class="multi-legend" hidden></div>
+        <div id="batchLegend" class="multi-legend" hidden></div>
       </div>
       <div id="diffView" hidden>
         <h2>快照差异 <span class="hint">A → B，按圆周角度比较（周长不同亦可）</span></h2>
@@ -171,6 +201,14 @@
         <ul id="commonList" class="seg-list"></ul>
         <h3>各规格概览</h3>
         <ul id="multiSpecList" class="multi-spec-list"></ul>
+      </section>
+
+      <section class="panel results" id="batchResults" hidden>
+        <h2>批次换版计划</h2>
+        <div id="batchSummary" class="batch-summary" hidden></div>
+        <div id="batchFailureBox" class="no-solution batch-fail" hidden></div>
+        <h3>逐单选角与换版 <span id="batchOrderCount" class="hint"></span></h3>
+        <ul id="batchOrderList" class="batch-order-list"></ul>
       </section>
 
       <section class="panel diff-panel" id="diffListPanel" hidden>

@@ -342,3 +342,103 @@ test('路径边界：跨 0°、整圈可行与起终点相同', async () => {
   assert.equal(same.json.route.status, 'ok');
   assert.equal(Math.round(same.json.route.best.sweepDeg), 0);
 });
+
+/* ---------------- 批次换版计划 /api/batch-plan ---------------- */
+
+const batchBody = {
+  orders: [
+    { circumference: 400, seamWidth: 20, zones: [{ start: 60, end: 120 }] },
+    { circumference: 360, seamWidth: 15, zones: [{ start: 300, end: 30 }] },
+    { circumference: 500, seamWidth: 25, zones: [{ start: 90, end: 170 }] },
+  ],
+  detents: { enabled: true, steps: 12, offsetDeg: 0 },
+  initialDeg: 350,
+};
+
+test('批次计划：成功返回逐单结果、档位序列与逐段换版角度', async () => {
+  const r = await postJson('/api/batch-plan', batchBody);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.mode, 'batch');
+  assert.equal(r.json.feasible, true);
+  assert.equal(r.json.failure, null);
+  assert.equal(r.json.orders.length, 3);
+  assert.ok(Array.isArray(r.json.plan.detentSequence));
+  assert.equal(r.json.plan.stops.length, 3);
+  assert.equal(r.json.plan.changes.length, 3);
+  assert.equal(r.json.plan.changes[0].kind, 'initial');
+  for (let i = 1; i < 3; i++) assert.equal(r.json.plan.changes[i].kind, 'changeover');
+  // 总成本等于各段最短转角之和
+  const sum = r.json.plan.changes.reduce((s, c) => s + c.sweepDeg, 0);
+  assert.ok(Math.abs(sum - r.json.totalRotationDeg) < 1e-9);
+  assert.equal(r.json.detents.steps, 12);
+  assert.equal(r.json.detents.positions.length, 12);
+});
+
+test('批次计划：初始角度缺省为 0；非法 initialDeg → 400', async () => {
+  const { initialDeg, ...body } = batchBody;
+  assert.ok(initialDeg);
+  const r = await postJson('/api/batch-plan', body);
+  assert.equal(r.status, 200);
+  assert.equal(r.json.initialDeg, 0);
+
+  const bad = await postJson('/api/batch-plan', { ...batchBody, initialDeg: 'x' });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error, /initialDeg/);
+});
+
+test('批次计划：参数校验（工单数、周长、档位数、启用）→ 400', async () => {
+  const one = { ...batchBody, orders: batchBody.orders.slice(0, 1) };
+  assert.equal((await postJson('/api/batch-plan', one)).status, 400);
+
+  const badC = {
+    ...batchBody,
+    orders: batchBody.orders.map((o) => ({ ...o })),
+  };
+  badC.orders[1] = { ...badC.orders[1], circumference: -1 };
+  assert.equal((await postJson('/api/batch-plan', badC)).status, 400);
+
+  for (const steps of [1, 73, 12.5, '12']) {
+    const r = await postJson('/api/batch-plan', {
+      ...batchBody,
+      detents: { enabled: true, steps },
+    });
+    assert.equal(r.status, 400, `steps=${steps} 应 400`);
+    assert.match(r.json.error, /2～72/);
+  }
+
+  const off = await postJson('/api/batch-plan', {
+    ...batchBody,
+    detents: { enabled: false, steps: 12 },
+  });
+  assert.equal(off.status, 400);
+  assert.match(off.json.error, /启用/);
+});
+
+test('批次计划：整圈无解与有安全段但无档位分别报告首个失败工单', async () => {
+  const full = await postJson('/api/batch-plan', {
+    orders: [
+      { circumference: 360, seamWidth: 0, zones: [{ start: 0, end: 180 }, { start: 180, end: 360 }] },
+      { circumference: 360, seamWidth: 0, zones: [] },
+    ],
+    detents: { enabled: true, steps: 12 },
+  });
+  assert.equal(full.status, 200);
+  assert.equal(full.json.feasible, false);
+  assert.equal(full.json.plan, null);
+  assert.equal(full.json.failure.index, 0);
+  assert.equal(full.json.failure.fullCircleNoSolution, true);
+  assert.equal(full.json.failure.detentsNoneAvailable, false);
+
+  const none = await postJson('/api/batch-plan', {
+    orders: [
+      { circumference: 360, seamWidth: 0, zones: [] },
+      { circumference: 360, seamWidth: 0, zones: [{ start: 0, end: 10 }, { start: 20, end: 360 }] },
+    ],
+    detents: { enabled: true, steps: 12 },
+  });
+  assert.equal(none.status, 200);
+  assert.equal(none.json.feasible, false);
+  assert.equal(none.json.failure.index, 1);
+  assert.equal(none.json.failure.fullCircleNoSolution, false);
+  assert.equal(none.json.failure.detentsNoneAvailable, true);
+});
