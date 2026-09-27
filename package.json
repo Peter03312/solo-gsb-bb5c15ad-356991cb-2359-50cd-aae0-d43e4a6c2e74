@@ -1,0 +1,14 @@
+{
+  "name": "seam-avoidance",
+  "version": "1.0.0",
+  "private": true,
+  "description": "圆筒包装接缝避让：合并禁用旋转范围，求解最优旋转量并 Canvas 预览",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
